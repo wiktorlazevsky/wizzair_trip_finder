@@ -14,9 +14,12 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
+import sys
+
 from flights.wizzapi import WizzClient
 from flights.cache import Cache
 from flights.groups_finder import common_destinations, find_options
+from flights.solver import pick_hubs, common_meetups, cheapest_journeys
 
 CONFIG = "config.json"
 CACHE_FILE = ".wizz_cache.json"
@@ -50,8 +53,13 @@ def _all_airports(route_map: dict) -> list[dict]:
     return out
 
 
+def _progress(done: int, total: int, origin: str, dest: str) -> None:
+    line = f"  pricing {done}/{total}  {origin} -> {dest}"
+    print(line.ljust(56), end="\r", file=sys.stderr, flush=True)
+
+
 def _search(groups: dict[str, list[str]], date_from: str, date_to: str,
-            adults: int) -> dict:
+            adults: int, max_stops: int = 0, hub_count: int = 20) -> dict:
     groups = {g: [a.upper() for a in airs] for g, airs in groups.items() if airs}
     if len(groups) < 2:
         return {"error": "Need at least 2 people, each with at least one airport."}
@@ -68,11 +76,20 @@ def _search(groups: dict[str, list[str]], date_from: str, date_to: str,
         return {"error": "Fewer than 2 people have a valid Wizz airport.",
                 "warnings": warnings}
 
-    dests = sorted(common_destinations(route_map, groups))
     group_names = list(groups.keys())
+    direct = sorted(common_destinations(route_map, groups))
+    if max_stops >= 1:
+        hubs = pick_hubs(route_map, hub_count)
+        dests = sorted(common_meetups(route_map, groups, hubs))
+    else:
+        hubs = set()
+        dests = direct
+
     result = {
         "groups": group_names,
         "warnings": warnings,
+        "max_stops": max_stops,
+        "direct_count": len(direct),
         "common": [{"code": c, "name": route_map.get(c, {}).get("name", c)}
                    for c in dests],
         "options": [],
@@ -81,24 +98,49 @@ def _search(groups: dict[str, list[str]], date_from: str, date_to: str,
         return result
 
     cache = Cache(CACHE_FILE)
-    options = find_options(client, route_map, groups, dests,
-                           date_from, date_to, adults=adults, cache=cache)
-    for o in options:
-        result["options"].append({
-            "date": o.date,
-            "dest": o.dest,
-            "dest_name": o.dest_name,
-            "total": round(o.total_eur),
-            "legs": {
-                g: {
-                    "airport": o.per_group[g].airport,
-                    "price": round(o.per_group[g].price_eur),
-                    "times": o.per_group[g].times,
-                }
-                for g in group_names
-            },
-        })
+    if max_stops >= 1:
+        options = cheapest_journeys(
+            client, route_map, groups, dests, date_from, date_to,
+            adults=adults, hubs=hubs, cache=cache, progress=_progress)
+        print(" " * 56, end="\r", file=sys.stderr)
+        for o in options:
+            result["options"].append({
+                "date": o.date, "dest": o.dest, "dest_name": o.dest_name,
+                "total": round(o.total_eur),
+                "legs": {g: _route_json(o.per_group[g]) for g in group_names},
+            })
+    else:
+        options = find_options(client, route_map, groups, dests,
+                               date_from, date_to, adults=adults, cache=cache)
+        for o in options:
+            gb = o.per_group
+            result["options"].append({
+                "date": o.date, "dest": o.dest, "dest_name": o.dest_name,
+                "total": round(o.total_eur),
+                "legs": {
+                    g: {
+                        "total": round(gb[g].price_eur),
+                        "hub": None,
+                        "legs": [{
+                            "from": gb[g].airport, "to": o.dest,
+                            "price": round(gb[g].price_eur), "times": gb[g].times,
+                        }],
+                    }
+                    for g in group_names
+                },
+            })
     return result
+
+
+def _route_json(r) -> dict:
+    return {
+        "total": round(r.total_eur),
+        "hub": r.hub,
+        "legs": [{
+            "from": leg.origin, "to": leg.dest,
+            "price": round(leg.price_eur), "times": leg.times,
+        } for leg in r.legs],
+    }
 
 
 # --- HTML page -----------------------------------------------------------
@@ -188,8 +230,22 @@ PAGE = """<!doctype html>
       <label class="fld">From <input type="date" id="from" required></label>
       <label class="fld">To <input type="date" id="to" required></label>
       <label class="fld">Adults <input type="number" id="adults" value="1" min="1" max="9" style="width:64px"></label>
+      <label class="fld">Connections
+        <select id="stops" style="font:inherit;padding:7px 9px;border:1px solid var(--line);border-radius:8px">
+          <option value="0">Direct only</option>
+          <option value="1">Up to 1 stop</option>
+        </select>
+      </label>
+      <label class="fld" id="hubsFld" style="display:none">Hubs
+        <input type="number" id="hubs" value="20" min="5" max="60" style="width:64px">
+      </label>
       <button class="primary" id="go" type="button">Search</button>
     </div>
+    <p class="muted" id="stopsNote" style="margin:10px 0 0;display:none">
+      1-stop lets a person connect via a hub (e.g. MAD&rarr;BUD&rarr;dest) &mdash; far more shared
+      destinations, but the first run prices many routes and can take several minutes.
+      Same-day only; we show both departure times so you can confirm the layover.
+    </p>
   </div>
 
   <div id="out"></div>
@@ -309,6 +365,16 @@ function pickerEl(p) {
   return box;
 }
 
+// --- stops toggle UI ---
+const stopsSel = $("#stops");
+function syncStops() {
+  const on = stopsSel.value === "1";
+  $("#hubsFld").style.display = on ? "" : "none";
+  $("#stopsNote").style.display = on ? "" : "none";
+}
+stopsSel.addEventListener("change", syncStops);
+syncStops();
+
 // --- search ---
 const out = $("#out");
 $("#go").addEventListener("click", async () => {
@@ -322,14 +388,19 @@ $("#go").addEventListener("click", async () => {
     out.innerHTML = '<div class="card warn">Add at least 2 people, each with an airport.</div>';
     return;
   }
+  const stops = +stopsSel.value;
   go.disabled = true; go.textContent = "Searching…";
-  out.innerHTML = '<div class="card muted">Pricing every route over the window… first run can take ~30s.</div>';
+  const wait = stops >= 1
+    ? "Pricing direct + connecting routes… first run can take several minutes (cached after)."
+    : "Pricing every route over the window… first run can take ~30s.";
+  out.innerHTML = '<div class="card muted">'+wait+'</div>';
   try {
     const r = await fetch("/api/search", {
       method: "POST", headers: {"Content-Type":"application/json"},
       body: JSON.stringify({
         from: $("#from").value, to: $("#to").value,
         adults: +$("#adults").value || 1, groups,
+        max_stops: stops, hub_count: +$("#hubs").value || 20,
       }),
     });
     render(await r.json());
@@ -340,6 +411,19 @@ $("#go").addEventListener("click", async () => {
   }
 });
 
+function legCell(cell) {
+  // cell = {total, hub, legs:[{from,to,price,times}]}
+  const t = arr => (arr && arr.length) ? ' <span class="muted">'+arr.join(" ")+'</span>' : '';
+  if (!cell.hub) {
+    const l = cell.legs[0];
+    return '<b>'+l.from+'</b> '+l.price+'€'+t(l.times);
+  }
+  const parts = cell.legs.map(l =>
+    '<b>'+l.from+'&rarr;'+l.to+'</b> '+l.price+'€'+t(l.times));
+  return parts.join(' <span class="muted">/</span> ') +
+         ' <span class="muted">= '+cell.total+'€ via '+cell.hub+'</span>';
+}
+
 function render(d) {
   if (d.error) {
     out.innerHTML = '<div class="card warn">'+d.error+'</div>';
@@ -349,7 +433,13 @@ function render(d) {
   if (d.warnings && d.warnings.length)
     html += '<div class="card"><div class="warn">'+d.warnings.join("<br>")+'</div></div>';
 
-  html += '<div class="card"><h2>Common Wizz destinations ('+d.common.length+')</h2>';
+  const heading = d.max_stops >= 1
+    ? 'Common destinations with 1 stop ('+d.common.length+')'
+    : 'Common Wizz destinations ('+d.common.length+')';
+  html += '<div class="card"><h2>'+heading+'</h2>';
+  if (d.max_stops >= 1)
+    html += '<p class="muted" style="margin-top:-4px">'+d.direct_count+
+            ' reachable directly &rarr; '+d.common.length+' once one person may connect via a hub.</p>';
   if (d.common.length)
     html += '<div class="pills">'+d.common.map(c=>'<span class="pill">'+c.code+' '+(c.name||"")+'</span>').join("")+'</div>';
   else
@@ -365,9 +455,7 @@ function render(d) {
       html += '<tr><td>'+o.date+'</td><td><b>'+o.dest+'</b> '+(o.dest_name||"")+'</td>';
       html += '<td class="total">'+o.total+'€</td>';
       for (const g of d.groups) {
-        const l = o.legs[g];
-        const t = (l.times && l.times.length) ? ' <span class="muted">'+l.times.join(" ")+'</span>' : '';
-        html += '<td class="leg"><b>'+l.airport+'</b> '+l.price+'€'+t+'</td>';
+        html += '<td class="leg">'+legCell(o.legs[g])+'</td>';
       }
       html += '</tr>';
     }
@@ -426,6 +514,8 @@ class Handler(BaseHTTPRequestHandler):
                 date_from=payload.get("from", ""),
                 date_to=payload.get("to", ""),
                 adults=int(payload.get("adults", 1) or 1),
+                max_stops=int(payload.get("max_stops", 0) or 0),
+                hub_count=int(payload.get("hub_count", 20) or 20),
             )
         except Exception as e:
             data = {"error": str(e)}
