@@ -1,0 +1,19 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Price caches (regenerate themselves)
+.wizz_cache.json
+.flights_cache.json
+*.cache.json
+
+# OS / editor junk
+.DS_Store
+.idea/
+.vscode/
+
+# Local Claude Code config
+.claude/settings.local.json

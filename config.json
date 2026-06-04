@@ -1,0 +1,12 @@
+{
+  "groups": {
+    "Benelux":   ["EIN", "CRL", "MST"],
+    "Warsaw":    ["WAW", "WMI"],
+    "S.Germany": ["STR", "FMM", "NUE"],
+    "Madrid":    ["MAD"]
+  },
+  "alternates": {
+    "Madrid": { "London": ["LTN", "LGW"] }
+  },
+  "_comment": "4 friends. Each = candidate home airports (cheapest is used). The Madrid friend can be swapped to London with --london (or --swap Madrid=London). Only Wizz airports work: STN, MUC, BRU, LCJ are NOT on Wizz."
+}
