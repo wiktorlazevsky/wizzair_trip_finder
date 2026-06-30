@@ -15,6 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
 import sys
+import os
 
 from flights.wizzapi import WizzClient
 from flights.cache import Cache
@@ -23,7 +24,7 @@ from flights.solver import pick_hubs, common_meetups, cheapest_journeys
 
 CONFIG = "config.json"
 CACHE_FILE = ".wizz_cache.json"
-PORT = 8000
+PORT = int(os.environ.get("PORT", 8000))
 
 
 # --- shared Wizz state, built once, guarded by a lock --------------------
@@ -546,8 +547,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-    print(f"Dashboard: http://localhost:{PORT}  (Ctrl-C to stop)")
+    srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+    print(f"Dashboard: http://0.0.0.0:{PORT}  (Ctrl-C to stop)")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
