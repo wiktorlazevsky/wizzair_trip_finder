@@ -264,14 +264,28 @@ $("#from").value = iso(d0); $("#to").value = iso(d1);
 
 init();
 async function init() {
-  const [aps, cfg] = await Promise.all([
-    fetch("/api/airports").then(r=>r.json()),
-    fetch("/api/config").then(r=>r.json()),
-  ]);
-  AIRPORTS = aps;
-  AMAP = Object.fromEntries(aps.map(a=>[a.code, a.name]));
-  people = Object.entries(cfg.groups).map(([name, airports]) => ({name, airports}));
+  // Load config (people) and airports independently so one failing doesn't
+  // blank the page.
+  try {
+    const cfg = await fetch("/api/config").then(r=>r.json());
+    people = Object.entries((cfg && cfg.groups) || {}).map(([name, airports]) => ({name, airports}));
+  } catch (e) { people = []; }
+  if (!people.length) people = [{name:"Friend 1", airports:[]}, {name:"Friend 2", airports:[]}];
   renderPeople();
+
+  try {
+    const aps = await fetch("/api/airports").then(r=>r.json());
+    if (Array.isArray(aps)) {
+      AIRPORTS = aps;
+      AMAP = Object.fromEntries(aps.map(a=>[a.code, a.name]));
+    } else {
+      throw new Error((aps && aps.error) || "bad airport list");
+    }
+  } catch (e) {
+    $("#out").innerHTML = '<div class="card warn">Could not load the airport '+
+      'list from Wizz ('+e.message+'). You can still type codes, but search '+
+      'suggestions are off. Try reloading in a moment.</div>';
+  }
 }
 
 $("#addPerson").addEventListener("click", () => {
@@ -352,14 +366,23 @@ function pickerEl(p) {
     menu.classList.add("open");
   }
 
+  const addTyped = () => {
+    const code = inp.value.trim().toUpperCase();
+    if (code.length >= 3) { add(code); }   // server validates against Wizz network
+  };
   inp.addEventListener("input", () => { active = -1; refresh(); });
   inp.addEventListener("focus", refresh);
   inp.addEventListener("blur", () => setTimeout(close, 120));
   inp.addEventListener("keydown", e => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      if (menu.classList.contains("open") && active >= 0) add(matches[active].code);
+      else addTyped();                      // works even if suggestions are off
+      return;
+    }
     if (!menu.classList.contains("open")) return;
     if (e.key === "ArrowDown") { e.preventDefault(); active = Math.min(active+1, matches.length-1); refresh(); }
     else if (e.key === "ArrowUp") { e.preventDefault(); active = Math.max(active-1, 0); refresh(); }
-    else if (e.key === "Enter") { e.preventDefault(); if (active>=0) add(matches[active].code); }
     else if (e.key === "Escape") { close(); }
   });
   return box;

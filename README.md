@@ -8,6 +8,13 @@ far more shared destinations.
 Each friend is a *cluster* of candidate home airports (they take whichever is
 cheapest). Uses Wizz Air's own free public API — no key, prices in EUR.
 
+## Get it
+
+```bash
+git clone https://github.com/wiktorlazevsky/wizzair_trip_finder.git
+cd wizzair_trip_finder
+```
+
 ## Setup
 
 ```bash

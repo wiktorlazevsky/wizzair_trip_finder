@@ -82,12 +82,27 @@ class WizzClient:
 
     # --- setup -----------------------------------------------------------
     def _discover_base(self) -> str:
-        html = self._http.get(_METADATA_URL).text
-        # Slashes in the embedded JSON are unicode-escaped: https://...
-        m = re.search(r'"apiUrl":"([^"]+?Api)"', html)
-        if not m:
-            raise RuntimeError("Could not find Wizz apiUrl in metadata.json")
-        return m.group(1).replace("\\u002F", "/").replace("\\/", "/")
+        # The api URL is embedded in wizzair.com's metadata/app HTML, but its
+        # exact shape drifts: sometimes a small JSON file with the key quoted
+        # and slashes /-escaped ("apiUrl":"https:\\u002F\\u002F...Api"),
+        # sometimes the full app HTML with an unquoted key (apiUrl:"https://...
+        # Api"). We just hunt for the versioned be.wizzair.com/<ver>/Api URL
+        # directly, retrying with a fresh client (the response varies per call).
+        for attempt in range(3):
+            try:
+                html = _new_http().get(_METADATA_URL).text
+            except Exception:
+                time.sleep(0.8 * (attempt + 1))
+                continue
+            h = html.replace("\\u002F", "/").replace("\\/", "/")
+            m = re.search(r'https://be\.wizzair\.com/[0-9][0-9.]*/Api', h)
+            if m:
+                return m.group(0)
+            m = re.search(r'be\.wizzair\.com/[0-9][0-9.]*/Api', h)
+            if m:
+                return "https://" + m.group(0)
+            time.sleep(0.8 * (attempt + 1))
+        raise RuntimeError("Could not find Wizz apiUrl in metadata.json")
 
     def _load_fx(self) -> dict[str, float]:
         try:
